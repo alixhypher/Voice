@@ -1,0 +1,448 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Auto Voice Recorder</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0f1115;
+        --panel: #171a21;
+        --border: #262b36;
+        --text: #e6e8ee;
+        --muted: #8a93a6;
+        --accent: #4f8cff;
+        --good: #34d399;
+        --bad: #f87171;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+      }
+      .card {
+        width: 100%;
+        max-width: 560px;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        padding: 28px;
+        box-shadow: 0 10px 40px rgba(0, 0, 0, 0.35);
+      }
+      h1 { margin: 0 0 4px; font-size: 20px; }
+      p.sub { margin: 0 0 20px; color: var(--muted); font-size: 14px; }
+      .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+      button {
+        background: var(--accent);
+        color: #fff;
+        border: 0;
+        padding: 10px 16px;
+        border-radius: 10px;
+        font-size: 14px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      button.secondary {
+        background: transparent;
+        border: 1px solid var(--border);
+        color: var(--text);
+      }
+      button:disabled { opacity: 0.5; cursor: not-allowed; }
+      .status {
+        margin-top: 20px;
+        padding: 12px 14px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        font-size: 14px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .dot {
+        width: 10px; height: 10px; border-radius: 50%;
+        background: var(--muted);
+        transition: background-color 0.15s ease;
+      }
+      .dot.idle { background: var(--muted); }
+      .dot.listening { background: var(--accent); animation: pulse 1.4s infinite; }
+      .dot.recording { background: var(--bad); animation: pulse 0.8s infinite; }
+      .dot.playing { background: var(--good); }
+      @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.35; }
+      }
+      .meter {
+        margin-top: 14px;
+        height: 8px;
+        background: #0b0d12;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        overflow: hidden;
+      }
+      .meter > span {
+        display: block;
+        height: 100%;
+        width: 0%;
+        background: linear-gradient(90deg, var(--accent), var(--good));
+        transition: width 0.05s linear;
+      }
+      .settings {
+        margin-top: 18px;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+      }
+      .field { display: flex; flex-direction: column; gap: 4px; }
+      .field label { font-size: 12px; color: var(--muted); }
+      .field input {
+        background: #0b0d12;
+        border: 1px solid var(--border);
+        color: var(--text);
+        padding: 8px 10px;
+        border-radius: 8px;
+        font-size: 14px;
+      }
+      audio { margin-top: 18px; width: 100%; }
+      .log {
+        margin-top: 14px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 12px;
+        color: var(--muted);
+        max-height: 120px;
+        overflow: auto;
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>Auto Voice Recorder</h1>
+      <p class="sub">
+        Starts recording automatically when speech is detected and plays it back
+        when speech stops. A rolling pre-roll buffer keeps the start intact.
+      </p>
+
+      <div class="row">
+        <button id="start">Start listening</button>
+        <button id="stop" class="secondary" disabled>Stop</button>
+      </div>
+
+      <div class="status">
+        <span id="dot" class="dot idle"></span>
+        <span id="state">Idle</span>
+      </div>
+
+      <div class="meter"><span id="level"></span></div>
+
+      <div class="settings">
+        <div class="field">
+          <label for="threshold">Speech threshold (RMS 0–1)</label>
+          <input id="threshold" type="number" step="0.005" min="0" max="1" value="0.02" />
+        </div>
+        <div class="field">
+          <label for="silence">Silence to stop (ms)</label>
+          <input id="silence" type="number" step="50" min="100" value="900" />
+        </div>
+        <div class="field">
+          <label for="preroll">Pre-roll (ms)</label>
+          <input id="preroll" type="number" step="50" min="0" value="400" />
+        </div>
+        <div class="field">
+          <label for="minspeech">Min speech to keep (ms)</label>
+          <input id="minspeech" type="number" step="50" min="0" value="250" />
+        </div>
+      </div>
+
+      <audio id="player" controls></audio>
+      <div class="log" id="log"></div>
+    </div>
+
+    <script>
+      (() => {
+        const startBtn = document.getElementById("start");
+        const stopBtn = document.getElementById("stop");
+        const dot = document.getElementById("dot");
+        const stateEl = document.getElementById("state");
+        const levelEl = document.getElementById("level");
+        const player = document.getElementById("player");
+        const logEl = document.getElementById("log");
+        const thresholdInput = document.getElementById("threshold");
+        const silenceInput = document.getElementById("silence");
+        const prerollInput = document.getElementById("preroll");
+        const minSpeechInput = document.getElementById("minspeech");
+
+        let audioCtx = null;
+        let mediaStream = null;
+        let sourceNode = null;
+        let processor = null;
+        let sampleRate = 48000;
+
+        // Rolling pre-roll buffer (ring) of Float32 samples.
+        let preRoll = null;
+        let preRollWrite = 0;
+        let preRollFilled = 0;
+        let preRollSize = 0;
+
+        // Active recording buffer (list of Float32Array chunks).
+        let recChunks = [];
+        let recLength = 0;
+
+        let speaking = false;
+        let silenceStart = 0;
+        let speechStart = 0;
+        let running = false;
+
+        function log(msg) {
+          const ts = new Date().toLocaleTimeString();
+          logEl.textContent = `[${ts}] ${msg}\n` + logEl.textContent;
+        }
+
+        function setState(name, label) {
+          dot.className = `dot ${name}`;
+          stateEl.textContent = label;
+        }
+
+        async function start() {
+          if (running) return;
+          try {
+            mediaStream = await navigator.mediaDevices.getUserMedia({
+              audio: {
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true,
+              },
+            });
+          } catch (err) {
+            log(`Microphone error: ${err.message}`);
+            return;
+          }
+
+          audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+          sampleRate = audioCtx.sampleRate;
+          sourceNode = audioCtx.createMediaStreamSource(mediaStream);
+
+          const bufSize = 2048;
+          processor = audioCtx.createScriptProcessor(bufSize, 1, 1);
+
+          preRollSize = Math.max(1, Math.floor((prerollMs() / 1000) * sampleRate));
+          preRoll = new Float32Array(preRollSize);
+          preRollWrite = 0;
+          preRollFilled = 0;
+
+          processor.onaudioprocess = (e) => {
+            const input = e.inputBuffer.getChannelData(0);
+            onSamples(input);
+          };
+
+          sourceNode.connect(processor);
+          processor.connect(audioCtx.destination);
+
+          running = true;
+          setState("listening", "Listening for speech…");
+          startBtn.disabled = true;
+          stopBtn.disabled = false;
+          log(`Listening (sampleRate=${sampleRate} Hz).`);
+        }
+
+        function stop() {
+          running = false;
+          speaking = false;
+          if (processor) {
+            try { processor.disconnect(); } catch {}
+            processor.onaudioprocess = null;
+          }
+          if (sourceNode) {
+            try { sourceNode.disconnect(); } catch {}
+          }
+          if (mediaStream) {
+            mediaStream.getTracks().forEach((t) => t.stop());
+          }
+          if (audioCtx) {
+            audioCtx.close().catch(() => {});
+          }
+          audioCtx = null;
+          mediaStream = null;
+          sourceNode = null;
+          processor = null;
+          recChunks = [];
+          recLength = 0;
+          levelEl.style.width = "0%";
+          setState("idle", "Idle");
+          startBtn.disabled = false;
+          stopBtn.disabled = true;
+          log("Stopped.");
+        }
+
+        function prerollMs() {
+          return Math.max(0, Number(prerollInput.value) || 0);
+        }
+
+        function onSamples(samples) {
+          // Copy, because the underlying buffer is reused by the audio graph.
+          const copy = new Float32Array(samples.length);
+          copy.set(samples);
+
+          // Update ring buffer (pre-roll).
+          writePreRoll(copy);
+
+          // Compute RMS for voice activity detection.
+          let sum = 0;
+          for (let i = 0; i < copy.length; i++) sum += copy[i] * copy[i];
+          const rms = Math.sqrt(sum / copy.length);
+
+          levelEl.style.width = `${Math.min(100, rms * 400).toFixed(1)}%`;
+
+          const threshold = Math.max(0, Number(thresholdInput.value) || 0);
+          const silenceMs = Math.max(100, Number(silenceInput.value) || 0);
+          const minSpeechMs = Math.max(0, Number(minSpeechInput.value) || 0);
+          const now = performance.now();
+
+          if (rms > threshold) {
+            if (!speaking) {
+              speaking = true;
+              speechStart = now;
+              // Seed recording buffer with pre-roll so onset isn't cut off.
+              const preRollSnapshot = snapshotPreRoll();
+              recChunks = [];
+              recLength = 0;
+              if (preRollSnapshot.length > 0) {
+                recChunks.push(preRollSnapshot);
+                recLength += preRollSnapshot.length;
+              }
+              setState("recording", "Recording…");
+              log("Speech detected — recording.");
+            }
+            silenceStart = 0;
+            recChunks.push(copy);
+            recLength += copy.length;
+          } else if (speaking) {
+            // Still inside the utterance; keep capturing trailing audio.
+            recChunks.push(copy);
+            recLength += copy.length;
+
+            if (silenceStart === 0) silenceStart = now;
+            if (now - silenceStart >= silenceMs) {
+              const durationMs = now - speechStart;
+              speaking = false;
+              silenceStart = 0;
+              if (durationMs - silenceMs >= minSpeechMs) {
+                finalizeAndPlay();
+              } else {
+                log(`Discarded short blip (${durationMs.toFixed(0)} ms).`);
+                recChunks = [];
+                recLength = 0;
+                setState("listening", "Listening for speech…");
+              }
+            }
+          }
+        }
+
+        function writePreRoll(chunk) {
+          const N = preRollSize;
+          if (N === 0) return;
+          const len = chunk.length;
+          if (len >= N) {
+            preRoll.set(chunk.subarray(len - N));
+            preRollWrite = 0;
+            preRollFilled = N;
+            return;
+          }
+          const tail = N - preRollWrite;
+          if (len <= tail) {
+            preRoll.set(chunk, preRollWrite);
+          } else {
+            preRoll.set(chunk.subarray(0, tail), preRollWrite);
+            preRoll.set(chunk.subarray(tail), 0);
+          }
+          preRollWrite = (preRollWrite + len) % N;
+          preRollFilled = Math.min(N, preRollFilled + len);
+        }
+
+        function snapshotPreRoll() {
+          const N = preRollFilled;
+          if (N === 0) return new Float32Array(0);
+          const out = new Float32Array(N);
+          if (preRollFilled < preRollSize) {
+            out.set(preRoll.subarray(0, N));
+          } else {
+            const start = preRollWrite;
+            const first = preRollSize - start;
+            out.set(preRoll.subarray(start), 0);
+            out.set(preRoll.subarray(0, start), first);
+          }
+          return out;
+        }
+
+        function finalizeAndPlay() {
+          const total = recLength;
+          if (total === 0) {
+            setState("listening", "Listening for speech…");
+            return;
+          }
+          const merged = new Float32Array(total);
+          let offset = 0;
+          for (const c of recChunks) {
+            merged.set(c, offset);
+            offset += c.length;
+          }
+          recChunks = [];
+          recLength = 0;
+
+          const wav = encodeWav(merged, sampleRate);
+          const url = URL.createObjectURL(wav);
+          if (player.src) URL.revokeObjectURL(player.src);
+          player.src = url;
+
+          setState("playing", "Playing back…");
+          log(`Playing ${(merged.length / sampleRate).toFixed(2)} s clip.`);
+          player.play().catch((err) => log(`Playback error: ${err.message}`));
+          player.onended = () => {
+            if (running) setState("listening", "Listening for speech…");
+          };
+        }
+
+        function encodeWav(samples, rate) {
+          const buffer = new ArrayBuffer(44 + samples.length * 2);
+          const view = new DataView(buffer);
+          writeString(view, 0, "RIFF");
+          view.setUint32(4, 36 + samples.length * 2, true);
+          writeString(view, 8, "WAVE");
+          writeString(view, 12, "fmt ");
+          view.setUint32(16, 16, true);
+          view.setUint16(20, 1, true); // PCM
+          view.setUint16(22, 1, true); // mono
+          view.setUint32(24, rate, true);
+          view.setUint32(28, rate * 2, true); // byte rate
+          view.setUint16(32, 2, true); // block align
+          view.setUint16(34, 16, true); // bits per sample
+          writeString(view, 36, "data");
+          view.setUint32(40, samples.length * 2, true);
+
+          let offset = 44;
+          for (let i = 0; i < samples.length; i++, offset += 2) {
+            const s = Math.max(-1, Math.min(1, samples[i]));
+            view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+          }
+          return new Blob([buffer], { type: "audio/wav" });
+        }
+
+        function writeString(view, offset, str) {
+          for (let i = 0; i < str.length; i++) {
+            view.setUint8(offset + i, str.charCodeAt(i));
+          }
+        }
+
+        startBtn.addEventListener("click", start);
+        stopBtn.addEventListener("click", stop);
+      })();
+    </script>
+  </body>
+</html>
