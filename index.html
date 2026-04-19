@@ -15,6 +15,7 @@
         --accent: #4f8cff;
         --good: #34d399;
         --bad: #f87171;
+        --warn: #fbbf24;
       }
       * { box-sizing: border-box; }
       body {
@@ -30,7 +31,7 @@
       }
       .card {
         width: 100%;
-        max-width: 560px;
+        max-width: 820px;
         background: var(--panel);
         border: 1px solid var(--border);
         border-radius: 16px;
@@ -94,10 +95,73 @@
         background: linear-gradient(90deg, var(--accent), var(--good));
         transition: width 0.05s linear;
       }
+
+      .readouts {
+        margin-top: 16px;
+        display: grid;
+        grid-template-columns: repeat(5, 1fr);
+        gap: 10px;
+      }
+      .readout {
+        background: #0b0d12;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 10px 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        min-width: 0;
+      }
+      .readout .lbl {
+        font-size: 11px;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+      .readout .val {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 18px;
+        font-weight: 600;
+        color: var(--text);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .readout .sub2 {
+        font-size: 11px;
+        color: var(--muted);
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      .readout.inactive .val { color: var(--muted); }
+
+      .spectro-wrap {
+        margin-top: 14px;
+        position: relative;
+        background: #05070b;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        overflow: hidden;
+      }
+      .spectro-wrap canvas { display: block; width: 100%; height: 220px; }
+      .spectro-wrap .axis {
+        position: absolute;
+        top: 0; left: 0; width: 38px; height: 100%;
+        background: linear-gradient(90deg, rgba(5,7,11,0.85), rgba(5,7,11,0));
+        pointer-events: none;
+        font-size: 10px;
+        color: var(--muted);
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      .spectro-wrap .axis span {
+        position: absolute;
+        left: 4px;
+        transform: translateY(-50%);
+      }
+
       .settings {
         margin-top: 18px;
         display: grid;
-        grid-template-columns: 1fr 1fr;
+        grid-template-columns: repeat(4, 1fr);
         gap: 12px;
       }
       .field { display: flex; flex-direction: column; gap: 4px; }
@@ -120,14 +184,20 @@
         overflow: auto;
         white-space: pre-wrap;
       }
+
+      @media (max-width: 640px) {
+        .readouts { grid-template-columns: repeat(2, 1fr); }
+        .settings { grid-template-columns: repeat(2, 1fr); }
+      }
     </style>
   </head>
   <body>
     <div class="card">
       <h1>Auto Voice Recorder</h1>
       <p class="sub">
-        Starts recording automatically when speech is detected and plays it back
-        when speech stops. A rolling pre-roll buffer keeps the start intact.
+        Records automatically when speech is detected (with pre-roll so the onset
+        isn't clipped) and plays it back when speech stops. Shows live pitch,
+        formant/resonance estimates, and a scrolling spectrogram.
       </p>
 
       <div class="row">
@@ -141,6 +211,39 @@
       </div>
 
       <div class="meter"><span id="level"></span></div>
+
+      <div class="readouts">
+        <div class="readout inactive" id="ro-pitch">
+          <div class="lbl">Pitch (F0)</div>
+          <div class="val" id="pitchHz">—</div>
+          <div class="sub2" id="pitchNote">&nbsp;</div>
+        </div>
+        <div class="readout inactive" id="ro-f1">
+          <div class="lbl">F1</div>
+          <div class="val" id="f1Hz">—</div>
+          <div class="sub2">open/close</div>
+        </div>
+        <div class="readout inactive" id="ro-f2">
+          <div class="lbl">F2</div>
+          <div class="val" id="f2Hz">—</div>
+          <div class="sub2">front/back</div>
+        </div>
+        <div class="readout inactive" id="ro-f3">
+          <div class="lbl">F3</div>
+          <div class="val" id="f3Hz">—</div>
+          <div class="sub2">brightness</div>
+        </div>
+        <div class="readout inactive" id="ro-bright">
+          <div class="lbl">Resonance</div>
+          <div class="val" id="brightVal">—</div>
+          <div class="sub2" id="brightSub">spectral centroid</div>
+        </div>
+      </div>
+
+      <div class="spectro-wrap">
+        <canvas id="spectro" width="1600" height="440"></canvas>
+        <div class="axis" id="axis"></div>
+      </div>
 
       <div class="settings">
         <div class="field">
@@ -179,19 +282,46 @@
         const prerollInput = document.getElementById("preroll");
         const minSpeechInput = document.getElementById("minspeech");
 
+        const pitchHzEl = document.getElementById("pitchHz");
+        const pitchNoteEl = document.getElementById("pitchNote");
+        const f1El = document.getElementById("f1Hz");
+        const f2El = document.getElementById("f2Hz");
+        const f3El = document.getElementById("f3Hz");
+        const brightEl = document.getElementById("brightVal");
+        const brightSub = document.getElementById("brightSub");
+        const roPitch = document.getElementById("ro-pitch");
+        const roF1 = document.getElementById("ro-f1");
+        const roF2 = document.getElementById("ro-f2");
+        const roF3 = document.getElementById("ro-f3");
+        const roBright = document.getElementById("ro-bright");
+
+        const spectro = document.getElementById("spectro");
+        const sctx = spectro.getContext("2d");
+        const axisEl = document.getElementById("axis");
+
+        // Spectrogram config.
+        const SPECTRO_MAX_HZ = 5000;
+        const SPECTRO_MIN_DB = -100;
+        const SPECTRO_MAX_DB = -20;
+
+        // Audio state.
         let audioCtx = null;
         let mediaStream = null;
         let sourceNode = null;
         let processor = null;
+        let analyser = null;
+        let fftBinsDb = null;
+        let timeBuf = null;
         let sampleRate = 48000;
+        let animHandle = 0;
 
-        // Rolling pre-roll buffer (ring) of Float32 samples.
+        // Pre-roll ring buffer (Float32 samples).
         let preRoll = null;
         let preRollWrite = 0;
         let preRollFilled = 0;
         let preRollSize = 0;
 
-        // Active recording buffer (list of Float32Array chunks).
+        // Active recording buffer.
         let recChunks = [];
         let recLength = 0;
 
@@ -199,6 +329,11 @@
         let silenceStart = 0;
         let speechStart = 0;
         let running = false;
+
+        // Smoothed display values to steady the UI.
+        const smooth = { f0: 0, f1: 0, f2: 0, f3: 0, bright: 0 };
+
+        buildAxis();
 
         function log(msg) {
           const ts = new Date().toLocaleTimeString();
@@ -208,6 +343,18 @@
         function setState(name, label) {
           dot.className = `dot ${name}`;
           stateEl.textContent = label;
+        }
+
+        function buildAxis() {
+          axisEl.innerHTML = "";
+          const marks = [0, 1000, 2000, 3000, 4000, 5000];
+          for (const hz of marks) {
+            const s = document.createElement("span");
+            const frac = hz / SPECTRO_MAX_HZ;
+            s.style.top = `${(1 - frac) * 100}%`;
+            s.textContent = hz >= 1000 ? `${hz / 1000}k` : `${hz}`;
+            axisEl.appendChild(s);
+          }
         }
 
         async function start() {
@@ -229,6 +376,12 @@
           sampleRate = audioCtx.sampleRate;
           sourceNode = audioCtx.createMediaStreamSource(mediaStream);
 
+          analyser = audioCtx.createAnalyser();
+          analyser.fftSize = 4096;
+          analyser.smoothingTimeConstant = 0.35;
+          fftBinsDb = new Float32Array(analyser.frequencyBinCount);
+          timeBuf = new Float32Array(analyser.fftSize);
+
           const bufSize = 2048;
           processor = audioCtx.createScriptProcessor(bufSize, 1, 1);
 
@@ -242,39 +395,45 @@
             onSamples(input);
           };
 
+          sourceNode.connect(analyser);
           sourceNode.connect(processor);
           processor.connect(audioCtx.destination);
+
+          // Clear spectrogram.
+          sctx.fillStyle = "#05070b";
+          sctx.fillRect(0, 0, spectro.width, spectro.height);
 
           running = true;
           setState("listening", "Listening for speech…");
           startBtn.disabled = true;
           stopBtn.disabled = false;
-          log(`Listening (sampleRate=${sampleRate} Hz).`);
+          log(`Listening (sampleRate=${sampleRate} Hz, fft=${analyser.fftSize}).`);
+
+          tick();
         }
 
         function stop() {
           running = false;
           speaking = false;
+          if (animHandle) cancelAnimationFrame(animHandle);
+          animHandle = 0;
           if (processor) {
             try { processor.disconnect(); } catch {}
             processor.onaudioprocess = null;
           }
-          if (sourceNode) {
-            try { sourceNode.disconnect(); } catch {}
-          }
-          if (mediaStream) {
-            mediaStream.getTracks().forEach((t) => t.stop());
-          }
-          if (audioCtx) {
-            audioCtx.close().catch(() => {});
-          }
+          if (sourceNode) { try { sourceNode.disconnect(); } catch {} }
+          if (analyser) { try { analyser.disconnect(); } catch {} }
+          if (mediaStream) mediaStream.getTracks().forEach((t) => t.stop());
+          if (audioCtx) audioCtx.close().catch(() => {});
           audioCtx = null;
           mediaStream = null;
           sourceNode = null;
           processor = null;
+          analyser = null;
           recChunks = [];
           recLength = 0;
           levelEl.style.width = "0%";
+          clearReadouts();
           setState("idle", "Idle");
           startBtn.disabled = false;
           stopBtn.disabled = true;
@@ -285,15 +444,12 @@
           return Math.max(0, Number(prerollInput.value) || 0);
         }
 
+        // ---- VAD + recording ------------------------------------------------
         function onSamples(samples) {
-          // Copy, because the underlying buffer is reused by the audio graph.
           const copy = new Float32Array(samples.length);
           copy.set(samples);
-
-          // Update ring buffer (pre-roll).
           writePreRoll(copy);
 
-          // Compute RMS for voice activity detection.
           let sum = 0;
           for (let i = 0; i < copy.length; i++) sum += copy[i] * copy[i];
           const rms = Math.sqrt(sum / copy.length);
@@ -309,13 +465,12 @@
             if (!speaking) {
               speaking = true;
               speechStart = now;
-              // Seed recording buffer with pre-roll so onset isn't cut off.
-              const preRollSnapshot = snapshotPreRoll();
+              const pre = snapshotPreRoll();
               recChunks = [];
               recLength = 0;
-              if (preRollSnapshot.length > 0) {
-                recChunks.push(preRollSnapshot);
-                recLength += preRollSnapshot.length;
+              if (pre.length > 0) {
+                recChunks.push(pre);
+                recLength += pre.length;
               }
               setState("recording", "Recording…");
               log("Speech detected — recording.");
@@ -324,7 +479,6 @@
             recChunks.push(copy);
             recLength += copy.length;
           } else if (speaking) {
-            // Still inside the utterance; keep capturing trailing audio.
             recChunks.push(copy);
             recLength += copy.length;
 
@@ -409,6 +563,297 @@
           };
         }
 
+        // ---- Real-time analysis loop ---------------------------------------
+        function tick() {
+          if (!running || !analyser) return;
+          analyser.getFloatTimeDomainData(timeBuf);
+          analyser.getFloatFrequencyData(fftBinsDb);
+
+          const threshold = Math.max(0, Number(thresholdInput.value) || 0);
+          let sum = 0;
+          for (let i = 0; i < timeBuf.length; i++) sum += timeBuf[i] * timeBuf[i];
+          const rms = Math.sqrt(sum / timeBuf.length);
+          const voiced = rms > Math.max(0.01, threshold * 0.75);
+
+          // Pitch via autocorrelation on the time-domain window.
+          let f0 = -1;
+          if (voiced) f0 = detectPitchAC(timeBuf, sampleRate);
+
+          // Formants via smoothed spectral peak picking.
+          let formants = [0, 0, 0];
+          if (voiced) formants = detectFormants(fftBinsDb, sampleRate, analyser.fftSize);
+
+          // Spectral centroid as a simple "resonance/brightness" proxy.
+          const centroid = voiced ? spectralCentroid(fftBinsDb, sampleRate, analyser.fftSize) : 0;
+
+          updateReadouts(voiced, f0, formants, centroid);
+          drawSpectrogramColumn(fftBinsDb, voiced ? formants : null, voiced ? f0 : 0);
+
+          animHandle = requestAnimationFrame(tick);
+        }
+
+        function clearReadouts() {
+          smooth.f0 = smooth.f1 = smooth.f2 = smooth.f3 = smooth.bright = 0;
+          pitchHzEl.textContent = "—";
+          pitchNoteEl.textContent = "";
+          f1El.textContent = "—";
+          f2El.textContent = "—";
+          f3El.textContent = "—";
+          brightEl.textContent = "—";
+          brightSub.textContent = "spectral centroid";
+          for (const el of [roPitch, roF1, roF2, roF3, roBright]) el.classList.add("inactive");
+        }
+
+        function updateReadouts(voiced, f0, formants, centroid) {
+          const alpha = 0.35; // display smoothing
+          if (voiced && f0 > 50 && f0 < 600) {
+            smooth.f0 = smooth.f0 ? smooth.f0 * (1 - alpha) + f0 * alpha : f0;
+            pitchHzEl.textContent = `${smooth.f0.toFixed(1)} Hz`;
+            pitchNoteEl.textContent = hzToNote(smooth.f0);
+            roPitch.classList.remove("inactive");
+          } else {
+            pitchHzEl.textContent = "—";
+            pitchNoteEl.textContent = "";
+            roPitch.classList.add("inactive");
+            smooth.f0 = 0;
+          }
+
+          const updateF = (val, el, ro, cur) => {
+            if (voiced && val > 150) {
+              const next = cur ? cur * (1 - alpha) + val * alpha : val;
+              el.textContent = `${next.toFixed(0)} Hz`;
+              ro.classList.remove("inactive");
+              return next;
+            }
+            el.textContent = "—";
+            ro.classList.add("inactive");
+            return 0;
+          };
+          smooth.f1 = updateF(formants[0], f1El, roF1, smooth.f1);
+          smooth.f2 = updateF(formants[1], f2El, roF2, smooth.f2);
+          smooth.f3 = updateF(formants[2], f3El, roF3, smooth.f3);
+
+          if (voiced && centroid > 0) {
+            smooth.bright = smooth.bright
+              ? smooth.bright * (1 - alpha) + centroid * alpha
+              : centroid;
+            brightEl.textContent = `${smooth.bright.toFixed(0)} Hz`;
+            brightSub.textContent = describeBrightness(smooth.bright);
+            roBright.classList.remove("inactive");
+          } else {
+            brightEl.textContent = "—";
+            brightSub.textContent = "spectral centroid";
+            roBright.classList.add("inactive");
+            smooth.bright = 0;
+          }
+        }
+
+        function describeBrightness(hz) {
+          if (hz < 900) return "dark / chest";
+          if (hz < 1600) return "neutral";
+          if (hz < 2400) return "forward";
+          return "bright / heady";
+        }
+
+        function hzToNote(hz) {
+          const names = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
+          const midi = 69 + 12 * Math.log2(hz / 440);
+          const rounded = Math.round(midi);
+          const cents = Math.round((midi - rounded) * 100);
+          const name = names[((rounded % 12) + 12) % 12];
+          const octave = Math.floor(rounded / 12) - 1;
+          const sign = cents >= 0 ? "+" : "";
+          return `${name}${octave} ${sign}${cents}¢`;
+        }
+
+        // ---- Pitch detection (autocorrelation with parabolic interp) -------
+        function detectPitchAC(buf, rate) {
+          const SIZE = buf.length;
+          let rms = 0;
+          for (let i = 0; i < SIZE; i++) rms += buf[i] * buf[i];
+          rms = Math.sqrt(rms / SIZE);
+          if (rms < 0.01) return -1;
+
+          const minLag = Math.floor(rate / 500); // 500 Hz max
+          const maxLag = Math.floor(rate / 70);  // 70 Hz min
+          if (maxLag >= SIZE) return -1;
+
+          let bestLag = -1;
+          let bestCorr = 0;
+          let prev = 0;
+          // Normalized autocorrelation with early termination on first strong peak.
+          for (let lag = minLag; lag <= maxLag; lag++) {
+            let sum = 0;
+            for (let i = 0; i < SIZE - lag; i++) sum += buf[i] * buf[i + lag];
+            if (sum > bestCorr) { bestCorr = sum; bestLag = lag; }
+          }
+          if (bestLag <= 0) return -1;
+
+          // Parabolic interpolation around bestLag for sub-sample precision.
+          const y1 = acAt(buf, bestLag - 1);
+          const y2 = acAt(buf, bestLag);
+          const y3 = acAt(buf, bestLag + 1);
+          const denom = (y1 - 2 * y2 + y3);
+          let lag = bestLag;
+          if (denom !== 0) lag = bestLag + 0.5 * (y1 - y3) / denom;
+
+          // Reject very low correlations (noisy / unvoiced).
+          const norm = bestCorr / (SIZE - bestLag);
+          if (norm < 0.0015) return -1;
+
+          return rate / lag;
+        }
+
+        function acAt(buf, lag) {
+          if (lag < 1 || lag >= buf.length) return 0;
+          let s = 0;
+          for (let i = 0; i < buf.length - lag; i++) s += buf[i] * buf[i + lag];
+          return s;
+        }
+
+        // ---- Formants (smoothed log-spectrum peak picking) -----------------
+        // Takes dB spectrum from AnalyserNode and returns [F1, F2, F3] in Hz.
+        function detectFormants(magDb, rate, fftSize) {
+          const nBins = magDb.length;
+          const binHz = rate / fftSize;
+
+          // Moving-average smoothing — emulates formant envelope without LPC.
+          const W = 7;
+          const sm = new Float32Array(nBins);
+          let acc = 0;
+          const win = 2 * W + 1;
+          for (let i = 0; i < Math.min(win, nBins); i++) acc += magDb[i];
+          for (let i = 0; i < nBins; i++) {
+            const lo = i - W, hi = i + W;
+            if (lo > 0) acc -= magDb[lo - 1];
+            if (hi < nBins) acc += magDb[hi];
+            const n = Math.min(hi, nBins - 1) - Math.max(lo, 0) + 1;
+            sm[i] = acc / n;
+          }
+
+          const minBin = Math.max(1, Math.floor(250 / binHz));
+          const maxBin = Math.min(nBins - 2, Math.floor(3800 / binHz));
+          const peaks = [];
+          for (let i = minBin; i <= maxBin; i++) {
+            if (sm[i] > sm[i - 1] && sm[i] >= sm[i + 1] && sm[i] > -85) {
+              // Parabolic interpolation for sub-bin frequency.
+              const a = sm[i - 1], b = sm[i], c = sm[i + 1];
+              const denom = a - 2 * b + c;
+              const offset = denom !== 0 ? 0.5 * (a - c) / denom : 0;
+              peaks.push({ hz: (i + offset) * binHz, mag: b });
+            }
+          }
+          if (peaks.length === 0) return [0, 0, 0];
+
+          // Take the strongest handful, then sort by frequency.
+          peaks.sort((p, q) => q.mag - p.mag);
+          const top = peaks.slice(0, 5).sort((p, q) => p.hz - q.hz);
+
+          // Enforce reasonable formant bands by picking the first peak in each range.
+          const bands = [[250, 1100], [900, 2600], [1800, 3800]];
+          const out = [0, 0, 0];
+          const used = new Set();
+          for (let b = 0; b < bands.length; b++) {
+            const [lo, hi] = bands[b];
+            for (let i = 0; i < top.length; i++) {
+              if (used.has(i)) continue;
+              const hz = top[i].hz;
+              if (hz >= lo && hz <= hi && (b === 0 || hz > out[b - 1] + 120)) {
+                out[b] = hz;
+                used.add(i);
+                break;
+              }
+            }
+          }
+          return out;
+        }
+
+        function spectralCentroid(magDb, rate, fftSize) {
+          const nBins = magDb.length;
+          const binHz = rate / fftSize;
+          const loBin = Math.max(1, Math.floor(80 / binHz));
+          const hiBin = Math.min(nBins - 1, Math.floor(5000 / binHz));
+          let num = 0, den = 0;
+          for (let i = loBin; i <= hiBin; i++) {
+            const mag = Math.pow(10, magDb[i] / 20);
+            num += i * binHz * mag;
+            den += mag;
+          }
+          return den > 0 ? num / den : 0;
+        }
+
+        // ---- Spectrogram ---------------------------------------------------
+        function drawSpectrogramColumn(magDb, formants, f0) {
+          const W = spectro.width, H = spectro.height;
+          // Scroll left by 1 px.
+          sctx.drawImage(spectro, 0, 0, W, H, -1, 0, W, H);
+          // Clear the new rightmost column.
+          sctx.fillStyle = "#05070b";
+          sctx.fillRect(W - 1, 0, 1, H);
+
+          const nBins = magDb.length;
+          const binHz = sampleRate / (analyser ? analyser.fftSize : 4096);
+          const maxBin = Math.min(nBins - 1, Math.floor(SPECTRO_MAX_HZ / binHz));
+
+          for (let y = 0; y < H; y++) {
+            const frac = 1 - y / H; // top = high freq
+            const hz = frac * SPECTRO_MAX_HZ;
+            const bin = Math.min(maxBin, Math.floor(hz / binHz));
+            const db = magDb[bin];
+            const t = Math.max(0, Math.min(1,
+              (db - SPECTRO_MIN_DB) / (SPECTRO_MAX_DB - SPECTRO_MIN_DB)));
+            sctx.fillStyle = magma(t);
+            sctx.fillRect(W - 1, y, 1, 1);
+          }
+
+          // Overlay dots for formant tracks.
+          if (formants) {
+            const colors = ["#fbbf24", "#f87171", "#a78bfa"];
+            for (let i = 0; i < 3; i++) {
+              const hz = formants[i];
+              if (!hz) continue;
+              const y = (1 - hz / SPECTRO_MAX_HZ) * H;
+              if (y < 0 || y > H) continue;
+              sctx.fillStyle = colors[i];
+              sctx.fillRect(W - 2, y - 1, 2, 2);
+            }
+          }
+          if (f0 && f0 > 0) {
+            const y = (1 - f0 / SPECTRO_MAX_HZ) * H;
+            if (y >= 0 && y <= H) {
+              sctx.fillStyle = "#34d399";
+              sctx.fillRect(W - 2, y - 1, 2, 2);
+            }
+          }
+        }
+
+        // Magma-ish colormap. t in [0, 1].
+        function magma(t) {
+          // Approximated with a few control stops.
+          const stops = [
+            [0.00, [0, 0, 4]],
+            [0.15, [28, 16, 68]],
+            [0.30, [79, 18, 123]],
+            [0.50, [143, 36, 109]],
+            [0.70, [215, 70, 67]],
+            [0.85, [245, 150, 65]],
+            [1.00, [252, 253, 191]],
+          ];
+          for (let i = 1; i < stops.length; i++) {
+            if (t <= stops[i][0]) {
+              const [t1, c1] = stops[i - 1];
+              const [t2, c2] = stops[i];
+              const k = (t - t1) / (t2 - t1);
+              const r = c1[0] + (c2[0] - c1[0]) * k;
+              const g = c1[1] + (c2[1] - c1[1]) * k;
+              const b = c1[2] + (c2[2] - c1[2]) * k;
+              return `rgb(${r | 0},${g | 0},${b | 0})`;
+            }
+          }
+          return "rgb(252,253,191)";
+        }
+
+        // ---- WAV encoding --------------------------------------------------
         function encodeWav(samples, rate) {
           const buffer = new ArrayBuffer(44 + samples.length * 2);
           const view = new DataView(buffer);
@@ -417,12 +862,12 @@
           writeString(view, 8, "WAVE");
           writeString(view, 12, "fmt ");
           view.setUint32(16, 16, true);
-          view.setUint16(20, 1, true); // PCM
-          view.setUint16(22, 1, true); // mono
+          view.setUint16(20, 1, true);
+          view.setUint16(22, 1, true);
           view.setUint32(24, rate, true);
-          view.setUint32(28, rate * 2, true); // byte rate
-          view.setUint16(32, 2, true); // block align
-          view.setUint16(34, 16, true); // bits per sample
+          view.setUint32(28, rate * 2, true);
+          view.setUint16(32, 2, true);
+          view.setUint16(34, 16, true);
           writeString(view, 36, "data");
           view.setUint32(40, samples.length * 2, true);
 
